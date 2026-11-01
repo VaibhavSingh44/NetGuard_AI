@@ -1,0 +1,7 @@
+# gitattribute
+.gitattribute
+
+#csv file
+# UNSW_NB15_testing-set.csv
+# UNSW_NB15_training-set.csv
+*.csv
