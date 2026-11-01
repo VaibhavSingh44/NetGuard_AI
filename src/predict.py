@@ -16,7 +16,8 @@ one of two input sources chosen by the MODE variable near the top:
                        in MANUAL_RECORDS, requiring no CSV file at all.
 
 This is a BATCH PREDICTION PROTOTYPE.  It does not monitor live network
-traffic and does not claim production readiness.
+traffic and does not claim production readiness.  Results on a small
+sample do not establish real-world or live-network performance.
 
 The model file, CSV files, and all other project files are NEVER modified.
 
@@ -82,8 +83,7 @@ SAMPLE_SEED = 99    # fixed seed so the same 10 rows are drawn every run
 # ---------------------------------------------------------------------------
 # Each dictionary represents one network connection.
 # Provide values for all 42 feature columns.
-# Any column you omit will be filled with a safe default (0 for numbers,
-# "-" for text) and a warning will be printed.
+# Any column you omit will be reported as missing and the script will exit.
 #
 # Record 0: short UDP burst with no reply -- typical of normal internal traffic
 # Record 1: TCP session with high byte count and mismatched TTL values --
@@ -167,10 +167,11 @@ def validate_input(df: pd.DataFrame) -> pd.DataFrame:
     Prepare a raw DataFrame for prediction by the saved pipeline.
 
     Steps performed:
-      1. Remove any DROP_COLS columns (id, attack_cat, label) if present.
-         This is a safety net -- the label must never be passed as a feature.
-      2. Drop any unrecognised extra columns with a notice.
-      3. Fill any missing feature columns with safe defaults and warn.
+      1. Remove DROP_COLS columns (id, attack_cat, label) if present and
+         report each one that was removed.
+      2. Report and remove any unrecognised extra columns.
+      3. Report any missing feature columns and exit -- predictions on
+         incomplete data would be unreliable.
       4. Return the DataFrame with exactly the 42 columns in the right order.
 
     Parameters
@@ -190,25 +191,31 @@ def validate_input(df: pd.DataFrame) -> pd.DataFrame:
         print(f"[NOTICE] Removing non-feature column(s) from input: {leaked}")
         df = df.drop(columns=leaked)
 
-    # Step 2: drop columns the model was never trained on
+    # Step 2: report and remove columns the model was never trained on
     extra = [c for c in df.columns if c not in FEATURE_COLS]
     if extra:
-        print(f"[NOTICE] Dropping unrecognised column(s): {extra}")
+        print(f"[NOTICE] Dropping unrecognised column(s) not present in the "
+              f"trained feature set: {extra}")
         df = df.drop(columns=extra)
 
-    # Step 3: fill missing feature columns with safe defaults
+    # Step 3: report missing feature columns and exit.
+    # Silently filling missing features with artificial values would produce
+    # unreliable predictions without any indication something is wrong.
     missing = [c for c in FEATURE_COLS if c not in df.columns]
     if missing:
-        print(f"[WARNING] {len(missing)} feature column(s) missing from input.")
-        print("          They will be filled with default values:")
+        print(
+            f"\n[ERROR] {len(missing)} required feature column(s) are missing "
+            f"from the input:"
+        )
         for col in missing:
-            if col in CAT_COLS:
-                df[col] = "-"
-                print(f"  {col:<30} -> '-'  (categorical default)")
-            else:
-                df[col] = 0
-                print(f"  {col:<30} ->  0   (numerical default)")
-        print()
+            kind = "categorical" if col in CAT_COLS else "numerical"
+            print(f"  {col:<30}  ({kind})")
+        print(
+            "\n        Predictions on incomplete data would be unreliable."
+            "\n        Please supply all 42 feature columns listed in "
+            "\n        FEATURE_COLS and re-run."
+        )
+        sys.exit(1)
 
     # Step 4: reorder to the exact sequence the ColumnTransformer expects
     return df[FEATURE_COLS]
@@ -258,19 +265,21 @@ def print_results(
         print(f"\n  Prediction      : {label_str}")
 
         # ---- Probability display -------------------------------------------
-        # predict_proba returns the fraction of the 150 trees that voted
-        # "attack".  A value of 0.93 means 140 of 150 trees said "attack".
-        # This is a model estimate, not a definitive security verdict.
+        # predict_proba() returns the estimated class probabilities produced
+        # by the fitted Random Forest for each input record.  The value shown
+        # here is the model's estimated probability that this record is an
+        # attack (class 1).  It is a model estimate, not a certainty, and
+        # should not be interpreted as a definitive security verdict.
         print(f"  Attack prob.    : {pct:.1f}%  "
               f"(decision threshold: {ATTACK_PROB_THRESHOLD * 100:.0f}%)")
 
         if prob >= ATTACK_PROB_THRESHOLD:
-            print(f"  Interpretation  : {pct:.1f}% of the model's decision")
-            print( "                    trees voted 'attack'.")
+            print(f"  Interpretation  : The model estimates a {pct:.1f}% probability")
+            print( "                    of this record being an attack.")
             print( "                    -> Classified as ATTACK.")
         else:
-            print(f"  Interpretation  : Only {pct:.1f}% of the model's decision")
-            print( "                    trees voted 'attack'.")
+            print(f"  Interpretation  : The model estimates only a {pct:.1f}% probability")
+            print( "                    of this record being an attack.")
             print( "                    -> Classified as NORMAL.")
 
         print( "  NOTE: This is a model estimate based on network flow")
@@ -294,7 +303,9 @@ def print_results(
         acc = correct / total_with_labels * 100
         print(f"  SAMPLE ACCURACY : {correct}/{total_with_labels} correct  "
               f"({acc:.1f}%)")
-        print(f"  (Expected ~90% based on full test-set evaluation)")
+        print(f"  NOTE: This accuracy is measured on {total_with_labels} sampled")
+        print(f"        rows only.  It does not establish real-world or")
+        print(f"        live-network performance.")
         print(sep)
 
     print(f"\n[DONE] {n} prediction(s) complete.")
